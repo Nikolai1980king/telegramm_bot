@@ -11,6 +11,9 @@ bot_config.json
 bot.log
 nohup.out
 
+# Statistics
+statistics.json
+
 # Python
 __pycache__/
 *.py[cod]
@@ -51,4 +54,3 @@ Thumbs.db
 *.tmp
 *.bak
 *.swp
-

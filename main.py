@@ -1,9 +1,14 @@
 from telethon.sync import TelegramClient
 from telethon import functions, types
+from telethon.errors import (
+    UserBlockedError, FloodWaitError, PeerFloodError,
+    InputUserDeactivatedError, UsernameNotOccupiedError,
+    ChatWriteForbiddenError, TimeoutError as TelethonTimeoutError
+)
 import os
 import time
 from datetime import datetime, timedelta
-from flask import Flask, render_template, request, redirect, url_for, session
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify
 from functools import wraps
 import json
 import threading
@@ -11,6 +16,7 @@ import asyncio
 import logging
 import hashlib
 import secrets
+from collections import defaultdict
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)  # Секретный ключ для сессий
@@ -24,6 +30,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Конфигурационный файл
 CONFIG_FILE = os.path.join(BASE_DIR, 'bot_config.json')
+
+# Файл статистики
+STATISTICS_FILE = os.path.join(BASE_DIR, 'statistics.json')
 
 # Загрузка конфигурации по умолчанию
 DEFAULT_CONFIG = {
@@ -78,6 +87,62 @@ def load_config():
 def save_config(config):
     with open(CONFIG_FILE, 'w') as f:
         json.dump(config, f, indent=4)
+
+
+def load_statistics():
+    """Загружает статистику отправки сообщений"""
+    try:
+        if os.path.exists(STATISTICS_FILE):
+            with open(STATISTICS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка загрузки статистики: {e}")
+    
+    # Возвращаем структуру по умолчанию
+    return {
+        'total_sent': 0,
+        'total_failed': 0,
+        'total_blocked': 0,
+        'recipients': {},
+        'last_send_time': None,
+        'session_start': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'errors_history': []
+    }
+
+
+def save_statistics(stats):
+    """Сохраняет статистику отправки сообщений"""
+    try:
+        with open(STATISTICS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(stats, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения статистики: {e}")
+
+
+def get_error_type(error):
+    """Определяет тип ошибки для статистики"""
+    error_str = str(error)
+    error_type = type(error).__name__
+    
+    if isinstance(error, UserBlockedError):
+        return 'blocked', 'Пользователь заблокировал вас'
+    elif isinstance(error, FloodWaitError):
+        wait_seconds = getattr(error, 'seconds', 0)
+        return 'flood_wait', f'Лимит отправки, ждать {wait_seconds} сек'
+    elif isinstance(error, PeerFloodError):
+        return 'peer_flood', 'Слишком много запросов к пользователю'
+    elif isinstance(error, InputUserDeactivatedError):
+        return 'deactivated', 'Пользователь удалил аккаунт'
+    elif isinstance(error, UsernameNotOccupiedError):
+        return 'not_found', 'Пользователь не найден'
+    elif isinstance(error, ChatWriteForbiddenError):
+        return 'forbidden', 'Нет прав на отправку'
+    elif isinstance(error, TelethonTimeoutError):
+        return 'timeout', 'Таймаут соединения'
+    elif 'Connection' in error_type or 'network' in error_str.lower():
+        return 'connection', 'Проблема с сетью'
+    else:
+        return 'unknown', f'Неизвестная ошибка: {error_str[:100]}'
 
 
 def hash_password(password):
@@ -181,6 +246,7 @@ class TelegramBot:
         self.client = None
         self.loop = asyncio.new_event_loop()
         self.stop_flag = False
+        self.statistics = load_statistics()
         session_file = config.get('session_file', 'session_name')
         # Если путь относительный, делаем его относительно BASE_DIR
         if not os.path.isabs(session_file):
@@ -189,8 +255,36 @@ class TelegramBot:
             self.session_file = session_file
 
     async def _initialize_client(self):
+        # Удаляем lock файлы перед подключением
+        for lock_file in [self.session_file + '-journal', self.session_file + '-wal']:
+            if os.path.exists(lock_file):
+                try:
+                    os.remove(lock_file)
+                    logger.info(f"🗑️ Удален lock файл: {lock_file}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось удалить lock файл {lock_file}: {e}")
+        
         self.client = TelegramClient(self.session_file, self.config['api_id'], self.config['api_hash'])
-        await self.client.connect()
+        
+        # Повторные попытки подключения при ошибке блокировки базы данных
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                await self.client.connect()
+                break
+            except Exception as e:
+                if 'database is locked' in str(e) and attempt < max_retries - 1:
+                    logger.warning(f"⚠️ Попытка {attempt + 1}/{max_retries}: база данных заблокирована, жду 2 секунды...")
+                    await asyncio.sleep(2)
+                    # Попробуем удалить lock файлы еще раз
+                    for lock_file in [self.session_file + '-journal', self.session_file + '-wal']:
+                        if os.path.exists(lock_file):
+                            try:
+                                os.remove(lock_file)
+                            except:
+                                pass
+                else:
+                    raise
 
         if not await self.client.is_user_authorized():
             logger.info("📱 Требуется авторизация...")
@@ -218,6 +312,19 @@ class TelegramBot:
             logger.info("✅ Авторизация успешна!")
 
             while not self.stop_flag:
+                # Перезагружаем конфиг перед каждым циклом для применения изменений
+                self.config = load_config()
+                
+                # Проверяем, не был ли бот остановлен через веб-интерфейс
+                if not self.config.get('is_running', False):
+                    logger.info("🛑 Бот остановлен через веб-интерфейс")
+                    break
+                
+                # Нормализуем пути после перезагрузки конфига
+                self.config['photo_path'] = normalize_path(self.config['photo_path'])
+                if 'session_file' in self.config and not os.path.isabs(self.config.get('session_file', '')):
+                    self.config['session_file'] = normalize_path(self.config['session_file'])
+                
                 if not os.path.exists(self.config['photo_path']):
                     logger.error(f"⚠️ Файл не найден: {self.config['photo_path']}")
                     await asyncio.sleep(60)
@@ -250,6 +357,14 @@ class TelegramBot:
                 if '{datetime}' in caption:
                     caption = caption.format(datetime=current_time)
 
+                # Статистика текущей отправки
+                send_stats = {
+                    'success': [],
+                    'failed': [],
+                    'blocked': [],
+                    'errors': {}
+                }
+                
                 for user in self.config['recipients']:
                     if self.stop_flag:
                         break
@@ -260,9 +375,136 @@ class TelegramBot:
                             caption=caption,
                             parse_mode='html'
                         )
-                        logger.info(f"🖼️ Отправлено для {user} в {current_time}")
+                        # Успешная отправка
+                        logger.info(f"✅ Отправлено для {user} в {current_time}")
+                        send_stats['success'].append(user)
+                        
+                        # Обновляем статистику
+                        if user not in self.statistics['recipients']:
+                            self.statistics['recipients'][user] = {
+                                'success': 0,
+                                'failed': 0,
+                                'blocked': False,
+                                'last_success': None,
+                                'last_error': None,
+                                'errors': []
+                            }
+                        
+                        self.statistics['recipients'][user]['success'] += 1
+                        self.statistics['recipients'][user]['last_success'] = current_time
+                        self.statistics['total_sent'] += 1
+                        
+                    except FloodWaitError as e:
+                        # Лимит отправки - нужно подождать
+                        wait_seconds = getattr(e, 'seconds', 0)
+                        error_type, error_msg = get_error_type(e)
+                        logger.warning(f"⏱️ Лимит отправки для {user}: ждать {wait_seconds} секунд")
+                        
+                        send_stats['failed'].append(user)
+                        send_stats['errors'][user] = error_msg
+                        
+                        if user not in self.statistics['recipients']:
+                            self.statistics['recipients'][user] = {
+                                'success': 0,
+                                'failed': 0,
+                                'blocked': False,
+                                'last_success': None,
+                                'last_error': None,
+                                'errors': []
+                            }
+                        
+                        self.statistics['recipients'][user]['failed'] += 1
+                        self.statistics['recipients'][user]['last_error'] = current_time
+                        if error_type not in self.statistics['recipients'][user]['errors']:
+                            self.statistics['recipients'][user]['errors'].append(error_type)
+                        self.statistics['total_failed'] += 1
+                        
+                        # Ждем указанное время
+                        if wait_seconds > 0:
+                            logger.info(f"⏳ Ожидание {wait_seconds} секунд из-за лимита...")
+                            await asyncio.sleep(min(wait_seconds, 300))  # Максимум 5 минут
+                        
+                    except UserBlockedError:
+                        # Пользователь заблокировал
+                        error_type, error_msg = get_error_type(UserBlockedError())
+                        logger.error(f"🔒 Пользователь {user} заблокировал вас")
+                        
+                        send_stats['blocked'].append(user)
+                        send_stats['failed'].append(user)
+                        send_stats['errors'][user] = error_msg
+                        
+                        if user not in self.statistics['recipients']:
+                            self.statistics['recipients'][user] = {
+                                'success': 0,
+                                'failed': 0,
+                                'blocked': False,
+                                'last_success': None,
+                                'last_error': None,
+                                'errors': []
+                            }
+                        
+                        self.statistics['recipients'][user]['blocked'] = True
+                        self.statistics['recipients'][user]['failed'] += 1
+                        self.statistics['recipients'][user]['last_error'] = current_time
+                        if 'blocked' not in self.statistics['recipients'][user]['errors']:
+                            self.statistics['recipients'][user]['errors'].append('blocked')
+                        self.statistics['total_blocked'] += 1
+                        self.statistics['total_failed'] += 1
+                        
                     except Exception as e:
-                        logger.error(f"❌ Ошибка для {user}: {str(e)}")
+                        # Другие ошибки
+                        error_type, error_msg = get_error_type(e)
+                        logger.error(f"❌ Ошибка для {user}: {error_msg}")
+                        
+                        send_stats['failed'].append(user)
+                        send_stats['errors'][user] = error_msg
+                        
+                        if user not in self.statistics['recipients']:
+                            self.statistics['recipients'][user] = {
+                                'success': 0,
+                                'failed': 0,
+                                'blocked': False,
+                                'last_success': None,
+                                'last_error': None,
+                                'errors': []
+                            }
+                        
+                        self.statistics['recipients'][user]['failed'] += 1
+                        self.statistics['recipients'][user]['last_error'] = current_time
+                        if error_type not in self.statistics['recipients'][user]['errors']:
+                            self.statistics['recipients'][user]['errors'].append(error_type)
+                        self.statistics['total_failed'] += 1
+                        
+                        # Добавляем в историю ошибок
+                        self.statistics['errors_history'].append({
+                            'time': current_time,
+                            'recipient': user,
+                            'error_type': error_type,
+                            'error_msg': error_msg
+                        })
+                        # Оставляем только последние 100 ошибок
+                        if len(self.statistics['errors_history']) > 100:
+                            self.statistics['errors_history'] = self.statistics['errors_history'][-100:]
+                
+                # Обновляем время последней отправки
+                self.statistics['last_send_time'] = current_time
+                
+                # Сохраняем статистику
+                save_statistics(self.statistics)
+                
+                # Логируем итоги отправки
+                total = len(self.config['recipients'])
+                success_count = len(send_stats['success'])
+                failed_count = len(send_stats['failed'])
+                blocked_count = len(send_stats['blocked'])
+                
+                logger.info(f"📊 Итоги отправки: ✅ {success_count}/{total} успешно, ❌ {failed_count} ошибок, 🔒 {blocked_count} заблокировано")
+                
+                if send_stats['blocked']:
+                    logger.warning(f"🔒 Заблокированные пользователи: {', '.join(send_stats['blocked'])}")
+                
+                if send_stats['errors']:
+                    logger.warning(f"⚠️ Ошибки: {', '.join([f'{u}: {e}' for u, e in send_stats['errors'].items()])}")
 
                 if self.stop_flag:
                     break
@@ -291,7 +533,10 @@ class TelegramBot:
             logger.error(f"❌ Критическая ошибка: {str(e)}")
         finally:
             if self.client:
-                await self.client.disconnect()
+                try:
+                    await self.client.disconnect()
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка при отключении: {str(e)}")
             self.config['is_running'] = False
             save_config(self.config)
 
@@ -346,12 +591,75 @@ def logout():
     return redirect(url_for('login'))
 
 
+@app.route('/statistics')
+@login_required
+def statistics():
+    """API для получения статистики"""
+    stats = load_statistics()
+    
+    # Вычисляем процент успешности
+    total_attempts = stats['total_sent'] + stats['total_failed']
+    success_rate = (stats['total_sent'] / total_attempts * 100) if total_attempts > 0 else 0
+    
+    # Получаем список заблокированных
+    blocked_users = [
+        user for user, data in stats['recipients'].items()
+        if data.get('blocked', False)
+    ]
+    
+    # Получаем проблемных пользователей (много ошибок)
+    problematic_users = [
+        {
+            'user': user,
+            'failed': data['failed'],
+            'success': data['success'],
+            'errors': data.get('errors', []),
+            'last_error': data.get('last_error')
+        }
+        for user, data in stats['recipients'].items()
+        if data['failed'] > data['success'] and data['failed'] > 2
+    ]
+    
+    return jsonify({
+        'total_sent': stats['total_sent'],
+        'total_failed': stats['total_failed'],
+        'total_blocked': stats['total_blocked'],
+        'success_rate': round(success_rate, 2),
+        'blocked_users': blocked_users,
+        'problematic_users': problematic_users,
+        'last_send_time': stats.get('last_send_time'),
+        'recipients_count': len(stats['recipients']),
+        'recent_errors': stats['errors_history'][-10:]  # Последние 10 ошибок
+    })
+
+
+@app.route('/statistics/export')
+@login_required
+def export_statistics():
+    """Экспорт статистики в JSON"""
+    stats = load_statistics()
+    return jsonify(stats)
+
+
 @app.route('/')
 @login_required
 def index():
+    global bot_thread
     config = load_config()
+    
+    # Синхронизируем статус с реальным состоянием потока
+    if config.get('is_running'):
+        if bot_thread is None or not bot_thread.is_alive():
+            # Бот должен быть запущен, но поток не работает - обновляем статус
+            config['is_running'] = False
+            save_config(config)
+            logger.info("🔄 Статус синхронизирован: бот был остановлен")
+    
+    # Загружаем статистику
+    statistics = load_statistics()
+    
     hours = config['interval'] // 3600
-    return render_template('index.html', config=config, hours=hours)
+    return render_template('index.html', config=config, hours=hours, statistics=statistics)
 
 
 @app.route('/update', methods=['POST'])
@@ -543,4 +851,15 @@ def ensure_template_exists():
 
 if __name__ == '__main__':
     ensure_template_exists()
-    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+    
+    # Автозапуск бота, если в конфиге is_running = True
+    config = load_config()
+    if config.get('is_running'):
+        if bot_thread is None or not bot_thread.is_alive():
+            logger.info("🚀 Автозапуск бота (is_running = True)...")
+            bot_thread = threading.Thread(target=bot_worker, daemon=True)
+            bot_thread.start()
+        else:
+            logger.info("✅ Бот уже запущен")
+    
+    app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)

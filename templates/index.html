@@ -34,6 +34,20 @@
         .radio-option input[type="radio"] { margin-right: 5px; }
         small { color: #666; font-size: 12px; }
         .info-box { background: #e3f2fd; padding: 15px; border-radius: 4px; margin: 15px 0; border-left: 4px solid #2196F3; }
+        .stats-section { background: #f9f9f9; padding: 20px; border-radius: 6px; margin: 20px 0; border: 1px solid #e0e0e0; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 15px 0; }
+        .stat-card { background: white; padding: 15px; border-radius: 4px; border-left: 4px solid #4CAF50; }
+        .stat-card.error { border-left-color: #f44336; }
+        .stat-card.warning { border-left-color: #ff9800; }
+        .stat-card.blocked { border-left-color: #9c27b0; }
+        .stat-value { font-size: 24px; font-weight: bold; color: #333; }
+        .stat-label { font-size: 14px; color: #666; margin-top: 5px; }
+        .recipients-list { max-height: 300px; overflow-y: auto; margin-top: 10px; }
+        .recipient-item { padding: 10px; background: white; margin: 5px 0; border-radius: 4px; border-left: 3px solid #ddd; }
+        .recipient-item.blocked { border-left-color: #f44336; background: #ffebee; }
+        .recipient-item.problematic { border-left-color: #ff9800; background: #fff3e0; }
+        .recipient-item.success { border-left-color: #4CAF50; }
+        .refresh-btn { background: #2196F3; margin-left: 10px; }
     </style>
 </head>
 <body>
@@ -207,6 +221,54 @@
 
             <button type="submit">Сохранить настройки</button>
         </form>
+
+        <h2>📊 Статистика отправки сообщений</h2>
+        <div class="stats-section">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h3 style="margin: 0;">Общая статистика</h3>
+                <button type="button" class="refresh-btn" onclick="loadStatistics()">🔄 Обновить</button>
+            </div>
+            
+            <div class="stats-grid" id="stats_grid">
+                <div class="stat-card">
+                    <div class="stat-value" id="total_sent">0</div>
+                    <div class="stat-label">✅ Успешно отправлено</div>
+                </div>
+                <div class="stat-card error">
+                    <div class="stat-value" id="total_failed">0</div>
+                    <div class="stat-label">❌ Ошибок отправки</div>
+                </div>
+                <div class="stat-card blocked">
+                    <div class="stat-value" id="total_blocked">0</div>
+                    <div class="stat-label">🔒 Заблокировано</div>
+                </div>
+                <div class="stat-card warning">
+                    <div class="stat-value" id="success_rate">0%</div>
+                    <div class="stat-label">📈 Процент успешности</div>
+                </div>
+            </div>
+
+            <div style="margin-top: 20px;">
+                <h4>🔒 Заблокированные пользователи:</h4>
+                <div id="blocked_users" class="recipients-list">
+                    <p style="color: #666;">Загрузка...</p>
+                </div>
+            </div>
+
+            <div style="margin-top: 20px;">
+                <h4>⚠️ Проблемные получатели (много ошибок):</h4>
+                <div id="problematic_users" class="recipients-list">
+                    <p style="color: #666;">Загрузка...</p>
+                </div>
+            </div>
+
+            <div style="margin-top: 20px;">
+                <h4>📋 Последние ошибки:</h4>
+                <div id="recent_errors" class="recipients-list">
+                    <p style="color: #666;">Загрузка...</p>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -229,7 +291,65 @@
         // Инициализация при загрузке страницы
         document.addEventListener('DOMContentLoaded', function() {
             toggleScheduleOptions();
+            loadStatistics();
+            // Обновляем статистику каждые 30 секунд
+            setInterval(loadStatistics, 30000);
         });
+
+        // Загрузка статистики
+        function loadStatistics() {
+            fetch('/statistics')
+                .then(response => response.json())
+                .then(data => {
+                    // Обновляем общую статистику
+                    document.getElementById('total_sent').textContent = data.total_sent || 0;
+                    document.getElementById('total_failed').textContent = data.total_failed || 0;
+                    document.getElementById('total_blocked').textContent = data.total_blocked || 0;
+                    document.getElementById('success_rate').textContent = (data.success_rate || 0) + '%';
+
+                    // Заблокированные пользователи
+                    const blockedDiv = document.getElementById('blocked_users');
+                    if (data.blocked_users && data.blocked_users.length > 0) {
+                        blockedDiv.innerHTML = data.blocked_users.map(user => 
+                            `<div class="recipient-item blocked">🔒 ${user}</div>`
+                        ).join('');
+                    } else {
+                        blockedDiv.innerHTML = '<p style="color: #4CAF50;">✅ Нет заблокированных пользователей</p>';
+                    }
+
+                    // Проблемные пользователи
+                    const problematicDiv = document.getElementById('problematic_users');
+                    if (data.problematic_users && data.problematic_users.length > 0) {
+                        problematicDiv.innerHTML = data.problematic_users.map(item => 
+                            `<div class="recipient-item problematic">
+                                <strong>${item.user}</strong><br>
+                                <small>✅ Успешно: ${item.success} | ❌ Ошибок: ${item.failed}</small><br>
+                                <small>Ошибки: ${item.errors.join(', ')}</small>
+                                ${item.last_error ? '<br><small>Последняя ошибка: ' + item.last_error + '</small>' : ''}
+                            </div>`
+                        ).join('');
+                    } else {
+                        problematicDiv.innerHTML = '<p style="color: #4CAF50;">✅ Нет проблемных получателей</p>';
+                    }
+
+                    // Последние ошибки
+                    const errorsDiv = document.getElementById('recent_errors');
+                    if (data.recent_errors && data.recent_errors.length > 0) {
+                        errorsDiv.innerHTML = data.recent_errors.map(error => 
+                            `<div class="recipient-item error">
+                                <strong>${error.recipient}</strong> - ${error.error_msg}<br>
+                                <small>${error.time} | Тип: ${error.error_type}</small>
+                            </div>`
+                        ).reverse().join(''); // Показываем последние ошибки первыми
+                    } else {
+                        errorsDiv.innerHTML = '<p style="color: #4CAF50;">✅ Нет ошибок</p>';
+                    }
+                })
+                .catch(error => {
+                    console.error('Ошибка загрузки статистики:', error);
+                    document.getElementById('blocked_users').innerHTML = '<p style="color: #f44336;">Ошибка загрузки статистики</p>';
+                });
+        }
     </script>
 </body>
 </html>
