@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Управление Telegram ботом</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; margin: 0; padding: 20px; background: #f5f5f5; }
+        .container { max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #333; margin-top: 0; }
+        h2 { color: #555; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }
+        .form-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; color: #333; }
+        input[type="text"], textarea, input[type="number"] {
+            width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box;
+        }
+        textarea { height: 200px; }
+        button { background: #4CAF50; color: white; border: none; padding: 10px 15px; cursor: pointer; border-radius: 4px; font-size: 16px; }
+        button.stop { background: #f44336; }
+        button:hover { opacity: 0.9; }
+        .status { padding: 10px; margin: 10px 0; border-radius: 4px; font-weight: bold; }
+        .status.running { background: #dff0d8; color: #3c763d; }
+        .status.stopped { background: #f2dede; color: #a94442; }
+        .schedule-section { background: #f9f9f9; padding: 20px; border-radius: 6px; margin: 20px 0; border: 1px solid #e0e0e0; }
+        .schedule-option { margin: 10px 0; }
+        .schedule-option label { display: inline; font-weight: normal; margin-left: 5px; }
+        .days-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; margin: 10px 0; }
+        .day-checkbox { display: flex; flex-direction: column; align-items: center; padding: 10px; background: white; border: 2px solid #ddd; border-radius: 4px; cursor: pointer; }
+        .day-checkbox input[type="checkbox"] { margin-bottom: 5px; }
+        .day-checkbox:hover { border-color: #4CAF50; }
+        .day-checkbox input[type="checkbox"]:checked + label { color: #4CAF50; font-weight: bold; }
+        .radio-group { display: flex; gap: 20px; margin: 10px 0; }
+        .radio-option { display: flex; align-items: center; }
+        .radio-option input[type="radio"] { margin-right: 5px; }
+        small { color: #666; font-size: 12px; }
+        .info-box { background: #e3f2fd; padding: 15px; border-radius: 4px; margin: 15px 0; border-left: 4px solid #2196F3; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h1 style="margin: 0;">Управление Telegram ботом</h1>
+            <a href="/logout" style="color: #666; text-decoration: none; padding: 8px 15px; border: 1px solid #ddd; border-radius: 4px;">Выйти</a>
+        </div>
+
+        <div class="status {% if config.is_running %}running{% else %}stopped{% endif %}">
+            Статус: {% if config.is_running %}Работает{% else %}Остановлен{% endif %}
+        </div>
+
+        <form action="/control" method="post">
+            {% if not config.is_running %}
+                <button type="submit" name="action" value="start">Запустить бота</button>
+            {% else %}
+                <button type="submit" name="action" value="stop" class="stop">Остановить бота</button>
+            {% endif %}
+        </form>
+
+        <h2>Настройки бота</h2>
+        <form action="/update" method="post">
+            <div class="form-group">
+                <label for="api_id">API ID:</label>
+                <input type="text" id="api_id" name="api_id" value="{{ config.api_id }}" required>
+            </div>
+
+            <div class="form-group">
+                <label for="api_hash">API Hash:</label>
+                <input type="text" id="api_hash" name="api_hash" value="{{ config.api_hash }}" required>
+            </div>
+
+            <div class="form-group">
+                <label for="phone_number">Номер телефона:</label>
+                <input type="text" id="phone_number" name="phone_number" value="{{ config.phone_number }}" required>
+            </div>
+
+            <div class="form-group">
+                <label for="photo_path">Путь к изображению:</label>
+                <input type="text" id="photo_path" name="photo_path" value="{{ config.photo_path }}" required>
+            </div>
+
+            <div class="schedule-section">
+                <h3>📅 Настройки расписания отправки</h3>
+                
+                <div class="schedule-option">
+                    <input type="radio" id="schedule_type_interval" name="schedule_type" value="interval" 
+                           {% if config.get('schedule_type', 'interval') == 'interval' %}checked{% endif %} 
+                           onchange="toggleScheduleOptions()">
+                    <label for="schedule_type_interval">По интервалу (каждые N часов)</label>
+                </div>
+                
+                <div class="schedule-option">
+                    <input type="radio" id="schedule_type_schedule" name="schedule_type" value="schedule" 
+                           {% if config.get('schedule_type') == 'schedule' %}checked{% endif %} 
+                           onchange="toggleScheduleOptions()">
+                    <label for="schedule_type_schedule">По расписанию (дни, часы, даты)</label>
+                </div>
+
+                <div id="interval_settings" style="margin-top: 15px;">
+                    <label for="interval_hours">Интервал отправки (часы):</label>
+                    <input type="number" id="interval_hours" name="interval_hours" value="{{ hours }}" step="0.5" min="0.5">
+                </div>
+
+                <div id="schedule_settings" style="display: none; margin-top: 15px;">
+                    <div class="form-group">
+                        <label>Дни недели:</label>
+                        <div class="days-grid">
+                            <div class="day-checkbox">
+                                <input type="checkbox" id="schedule_day_mon" name="schedule_day_mon" 
+                                       {% if 0 in config.get('schedule_days', [0,1,2,3,4,5,6]) %}checked{% endif %}>
+                                <label for="schedule_day_mon">Пн</label>
+                            </div>
+                            <div class="day-checkbox">
+                                <input type="checkbox" id="schedule_day_tue" name="schedule_day_tue" 
+                                       {% if 1 in config.get('schedule_days', [0,1,2,3,4,5,6]) %}checked{% endif %}>
+                                <label for="schedule_day_tue">Вт</label>
+                            </div>
+                            <div class="day-checkbox">
+                                <input type="checkbox" id="schedule_day_wed" name="schedule_day_wed" 
+                                       {% if 2 in config.get('schedule_days', [0,1,2,3,4,5,6]) %}checked{% endif %}>
+                                <label for="schedule_day_wed">Ср</label>
+                            </div>
+                            <div class="day-checkbox">
+                                <input type="checkbox" id="schedule_day_thu" name="schedule_day_thu" 
+                                       {% if 3 in config.get('schedule_days', [0,1,2,3,4,5,6]) %}checked{% endif %}>
+                                <label for="schedule_day_thu">Чт</label>
+                            </div>
+                            <div class="day-checkbox">
+                                <input type="checkbox" id="schedule_day_fri" name="schedule_day_fri" 
+                                       {% if 4 in config.get('schedule_days', [0,1,2,3,4,5,6]) %}checked{% endif %}>
+                                <label for="schedule_day_fri">Пт</label>
+                            </div>
+                            <div class="day-checkbox">
+                                <input type="checkbox" id="schedule_day_sat" name="schedule_day_sat" 
+                                       {% if 5 in config.get('schedule_days', [0,1,2,3,4,5,6]) %}checked{% endif %}>
+                                <label for="schedule_day_sat">Сб</label>
+                            </div>
+                            <div class="day-checkbox">
+                                <input type="checkbox" id="schedule_day_sun" name="schedule_day_sun" 
+                                       {% if 6 in config.get('schedule_days', [0,1,2,3,4,5,6]) %}checked{% endif %}>
+                                <label for="schedule_day_sun">Вс</label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="schedule_hours">Часы отправки (через запятую, 0-23):</label>
+                        <input type="text" id="schedule_hours" name="schedule_hours" 
+                               value="{{ config.get('schedule_hours', [9, 12, 18])|join(', ') }}" 
+                               placeholder="9, 12, 18">
+                        <small>Например: 9, 12, 18 (отправка в 9:00, 12:00 и 18:00)</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Четные/нечетные даты:</label>
+                        <div class="radio-group">
+                            <div class="radio-option">
+                                <input type="radio" id="even_odd_both" name="schedule_even_odd" value="both" 
+                                       {% if config.get('schedule_even_odd', 'both') == 'both' %}checked{% endif %}>
+                                <label for="even_odd_both">Оба (каждый день)</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="even_odd_even" name="schedule_even_odd" value="even" 
+                                       {% if config.get('schedule_even_odd') == 'even' %}checked{% endif %}>
+                                <label for="even_odd_even">Только четные (2, 4, 6...)</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="even_odd_odd" name="schedule_even_odd" value="odd" 
+                                       {% if config.get('schedule_even_odd') == 'odd' %}checked{% endif %}>
+                                <label for="even_odd_odd">Только нечетные (1, 3, 5...)</label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="info-box">
+                        <strong>💡 Примеры:</strong><br>
+                        • Пн-Пт в 9:00 и 18:00 → выберите Пн-Пт, укажите "9, 18"<br>
+                        • Каждый день в 12:00 → выберите все дни, укажите "12"<br>
+                        • Четные числа в 10:00 → выберите все дни, укажите "10", выберите "Только четные"
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="recipients">Получатели (каждый с новой строки или через запятую):</label>
+                <textarea id="recipients" name="recipients" required>{{ '\n'.join(config.recipients) }}</textarea>
+            </div>
+
+            <div class="form-group">
+                <label for="caption">Текст сообщения:</label>
+                <textarea id="caption" name="caption" required>{{ config.caption }}</textarea>
+                <small>Используйте {datetime} для вставки даты и времени</small>
+            </div>
+
+            <div class="schedule-section" style="background: #fff3cd; border-color: #ffc107;">
+                <h3>🔒 Защита веб-интерфейса</h3>
+                <div class="form-group">
+                    <label for="web_password">Пароль для доступа (оставьте пустым, чтобы отключить защиту):</label>
+                    <input type="password" id="web_password" name="web_password" placeholder="Введите новый пароль">
+                    <small>Если пароль установлен, доступ к панели будет только по паролю</small>
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" name="web_password_clear" value="1">
+                        Удалить пароль (отключить защиту)
+                    </label>
+                </div>
+            </div>
+
+            <button type="submit">Сохранить настройки</button>
+        </form>
+    </div>
+
+    <script>
+        function toggleScheduleOptions() {
+            const scheduleType = document.querySelector('input[name="schedule_type"]:checked').value;
+            const intervalSettings = document.getElementById('interval_settings');
+            const scheduleSettings = document.getElementById('schedule_settings');
+            
+            if (scheduleType === 'interval') {
+                intervalSettings.style.display = 'block';
+                scheduleSettings.style.display = 'none';
+                document.getElementById('interval_hours').required = true;
+            } else {
+                intervalSettings.style.display = 'none';
+                scheduleSettings.style.display = 'block';
+                document.getElementById('interval_hours').required = false;
+            }
+        }
+        
+        // Инициализация при загрузке страницы
+        document.addEventListener('DOMContentLoaded', function() {
+            toggleScheduleOptions();
+        });
+    </script>
+</body>
+</html>

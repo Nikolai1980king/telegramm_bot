@@ -1,0 +1,20 @@
+{
+    "api_id": "YOUR_API_ID",
+    "api_hash": "YOUR_API_HASH",
+    "phone_number": "+1234567890",
+    "recipients": [
+        "@username1",
+        "@username2"
+    ],
+    "interval": 32400,
+    "photo_path": "image/cart_1.png",
+    "caption": "здесь будет видеоролик -переходи в приложение @znakomstva_v_kafe_bot",
+    "is_running": false,
+    "session_file": "session_name",
+    "schedule_type": "interval",
+    "schedule_days": [0, 1, 2, 3, 4, 5, 6],
+    "schedule_hours": [9, 12, 18],
+    "schedule_even_odd": "both",
+    "web_password": ""
+}
+
