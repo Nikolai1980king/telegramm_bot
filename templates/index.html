@@ -48,6 +48,8 @@
         .recipient-item.problematic { border-left-color: #ff9800; background: #fff3e0; }
         .recipient-item.success { border-left-color: #4CAF50; }
         .refresh-btn { background: #2196F3; margin-left: 10px; }
+        .reset-btn { background: #f44336; margin-left: 10px; }
+        .button-group { display: flex; gap: 10px; }
     </style>
 </head>
 <body>
@@ -225,8 +227,14 @@
         <h2>📊 Статистика отправки сообщений</h2>
         <div class="stats-section">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-                <h3 style="margin: 0;">Общая статистика</h3>
-                <button type="button" class="refresh-btn" onclick="loadStatistics()">🔄 Обновить</button>
+                <div>
+                    <h3 style="margin: 0;">Общая статистика</h3>
+                    <small style="color: #666;">Статистика обновляется автоматически каждые 30 секунд</small>
+                </div>
+                <div class="button-group">
+                    <button type="button" class="refresh-btn" onclick="loadStatistics(true)" title="Обновить данные статистики">🔄 Обновить</button>
+                    <button type="button" class="reset-btn" onclick="resetStatistics()" title="Сбросить всю статистику (все данные будут удалены)">🗑️ Сбросить</button>
+                </div>
             </div>
             
             <div class="stats-grid" id="stats_grid">
@@ -291,16 +299,46 @@
         // Инициализация при загрузке страницы
         document.addEventListener('DOMContentLoaded', function() {
             toggleScheduleOptions();
-            loadStatistics();
+            loadStatistics(false); // Автоматическая загрузка без индикатора
             // Обновляем статистику каждые 30 секунд
-            setInterval(loadStatistics, 30000);
+            setInterval(() => loadStatistics(false), 30000);
         });
 
         // Загрузка статистики
-        function loadStatistics() {
-            fetch('/statistics')
-                .then(response => response.json())
+        function loadStatistics(showLoading = true) {
+            // Показываем индикатор загрузки только при ручном обновлении
+            const refreshBtn = document.querySelector('.refresh-btn');
+            const originalText = refreshBtn ? refreshBtn.textContent : '';
+            if (refreshBtn && showLoading) {
+                refreshBtn.disabled = true;
+                refreshBtn.textContent = '⏳ Загрузка...';
+                refreshBtn.style.opacity = '0.6';
+            }
+            
+            fetch('/statistics', {
+                method: 'GET',
+                credentials: 'include',  // Важно: отправляем cookies для авторизации
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            })
+                .then(response => {
+                    if (!response.ok) {
+                        if (response.status === 401) {
+                            throw new Error('Требуется авторизация. Пожалуйста, войдите снова.');
+                        } else if (response.status === 500) {
+                            throw new Error('Ошибка сервера при загрузке статистики');
+                        } else {
+                            throw new Error(`Ошибка HTTP: ${response.status}`);
+                        }
+                    }
+                    return response.json();
+                })
                 .then(data => {
+                    // Проверяем наличие ошибки в ответе
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
                     // Обновляем общую статистику
                     document.getElementById('total_sent').textContent = data.total_sent || 0;
                     document.getElementById('total_failed').textContent = data.total_failed || 0;
@@ -344,10 +382,93 @@
                     } else {
                         errorsDiv.innerHTML = '<p style="color: #4CAF50;">✅ Нет ошибок</p>';
                     }
+                    
+                    // Восстанавливаем кнопку
+                    if (refreshBtn && showLoading) {
+                        refreshBtn.disabled = false;
+                        refreshBtn.textContent = originalText;
+                        refreshBtn.style.opacity = '1';
+                    }
                 })
                 .catch(error => {
                     console.error('Ошибка загрузки статистики:', error);
-                    document.getElementById('blocked_users').innerHTML = '<p style="color: #f44336;">Ошибка загрузки статистики</p>';
+                    const errorMsg = error.message || 'Неизвестная ошибка';
+                    
+                    // Показываем ошибку в разных местах
+                    const blockedDiv = document.getElementById('blocked_users');
+                    if (blockedDiv) {
+                        blockedDiv.innerHTML = `<p style="color: #f44336;">❌ Ошибка загрузки статистики: ${errorMsg}</p>`;
+                    }
+                    
+                    // Показываем уведомление при ручном обновлении
+                    if (showLoading) {
+                        alert('❌ Ошибка загрузки статистики:\n' + errorMsg);
+                    }
+                    
+                    // Восстанавливаем кнопку
+                    if (refreshBtn && showLoading) {
+                        refreshBtn.disabled = false;
+                        refreshBtn.textContent = originalText;
+                        refreshBtn.style.opacity = '1';
+                    }
+                });
+        }
+        
+        // Сброс статистики
+        function resetStatistics() {
+            // Подтверждение действия
+            if (!confirm('⚠️ ВНИМАНИЕ!\n\nВы уверены, что хотите сбросить всю статистику?\n\nВсе данные будут удалены:\n- Количество отправленных сообщений\n- Количество ошибок\n- История ошибок\n- Статистика по получателям\n\nЭто действие нельзя отменить!')) {
+                return;
+            }
+            
+            // Двойное подтверждение
+            if (!confirm('❌ Последнее предупреждение!\n\nВы действительно хотите удалить ВСЮ статистику?\n\nНажмите OK для подтверждения.')) {
+                return;
+            }
+            
+            // Показываем индикатор загрузки
+            const resetBtn = document.querySelector('.reset-btn');
+            const originalText = resetBtn ? resetBtn.textContent : '';
+            if (resetBtn) {
+                resetBtn.disabled = true;
+                resetBtn.textContent = '⏳ Сброс...';
+                resetBtn.style.opacity = '0.6';
+            }
+            
+            fetch('/statistics/reset', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('✅ Статистика успешно сброшена!');
+                        // Обновляем данные на странице (без показа индикатора загрузки)
+                        loadStatistics(false);
+                    } else {
+                        alert('❌ Ошибка при сбросе статистики: ' + (data.message || 'Неизвестная ошибка'));
+                    }
+                    
+                    // Восстанавливаем кнопку
+                    if (resetBtn) {
+                        resetBtn.disabled = false;
+                        resetBtn.textContent = originalText;
+                        resetBtn.style.opacity = '1';
+                    }
+                })
+                .catch(error => {
+                    console.error('Ошибка сброса статистики:', error);
+                    alert('❌ Ошибка при сбросе статистики: ' + error.message);
+                    
+                    // Восстанавливаем кнопку
+                    if (resetBtn) {
+                        resetBtn.disabled = false;
+                        resetBtn.textContent = originalText;
+                        resetBtn.style.opacity = '1';
+                    }
                 });
         }
     </script>
